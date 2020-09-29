@@ -11,7 +11,7 @@ const CSS: &str = "
   h1 a { color: white; }
   h1 { display: inline-block; background-color: #AB2346; padding: 10px 20px; }
   img { display: block; max-width: 100%; margin: 0px auto; }
-  input { display: block; margin: 0px auto; }
+  input { display: block; margin: 10px auto; }
   #dropzone { width: 600px; max-width: 90%; height: 300px; background-color: red; line-height: 300px; }
   #dropzone.hidden { display: none; }
   #dropzone.active { background-color: blue; }
