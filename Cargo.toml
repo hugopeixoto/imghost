@@ -1,0 +1,12 @@
+[package]
+name = "imghost"
+version = "0.1.0"
+authors = ["Hugo Peixoto <hugo.peixoto@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+tokio = { version = "0.2", features = ["full"] }
+warp = "0.2.5"
+futures = "0.3.5"
+rand = "0.7.3"
+http = "0.2"
