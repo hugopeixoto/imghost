@@ -12,9 +12,9 @@ This is how it looks like:
 ## Routes
 
 - `GET /` displays the upload form
-- `POST /upload` receives an image and redirects to the view page
-- `GET /image/<id>` displays an html page with an `img`
-- `GET /image/raw/<id>` serves the raw image
+- `POST /upload` receives a file and redirects to the view page
+- `GET /file/<id>` displays an html page that displays the file
+- `GET /file/raw/<id>` serves the raw file
 
 
 ## Things that would be nice to have
@@ -24,16 +24,13 @@ Alt text.
 Javascript progressive enhancement to allow drag and drop. This means using
 `fetch` to upload the file instead of submitting the form.
 
-Mime type detection, instead of assuming it's an image. Right now I'm taking
-whatever is uploaded and slapping it into an `<img/>`, but there's no
-restriction on what you can upload.
+Detect mime type from payload instead of relying on user provided content type.
 
-Set the right `content-type` in the raw endpoint. I'm not sure if this should
-be stored somewhere or if I should just detect it on each GET request.
+Reject files that are neither images nor video.
+
+Set the `content-type` in the raw endpoint.
 
 Metadata stripping.
-
-Video support. This would require mime type detection.
 
 Password protection for uploads. I don't want to end up serving malware. The
 password could be stored in a cookie or something so that you don't have to
