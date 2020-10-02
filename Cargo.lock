@@ -425,10 +425,13 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "http",
+ "hyper",
+ "mime",
  "rand 0.7.3",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-util",
  "warp",
 ]
 

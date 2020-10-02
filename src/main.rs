@@ -7,11 +7,58 @@ use warp::Filter;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Upload {
     alt: String,
-    // I would like this to be Option<mime::Mime>, but lol serde
-    content_type: Option<String>,
+    #[serde(serialize_with = "optional_mime_serializer")]
+    #[serde(deserialize_with = "optional_mime_deserializer")]
+    content_type: Option<mime::Mime>,
+}
+
+fn optional_mime_serializer<S>(t: &Option<mime::Mime>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    t.clone().map(|v| v.to_string()).serialize(serializer)
+}
+
+fn optional_mime_deserializer<'de, D>(deserializer: D) -> Result<Option<mime::Mime>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct OptionalMimeVisitor;
+    impl<'de> serde::de::Visitor<'de> for OptionalMimeVisitor {
+        type Value = Option<mime::Mime>;
+
+        fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+            formatter.write_str("an optional mime type")
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserializer.deserialize_string(OptionalMimeVisitor)
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Some(v.parse::<mime::Mime>())
+                .transpose()
+                .map_err(serde::de::Error::custom)
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(None)
+        }
+    }
+
+    deserializer.deserialize_option(OptionalMimeVisitor)
 }
 
 const CSS: &str = "
@@ -25,43 +72,6 @@ const CSS: &str = "
   #dropzone.hidden { display: none; }
   #dropzone.active { background-color: blue; }
 </style>";
-
-const JS: &str = "
-<script type='text/javascript'>
-    var droppedFiles = [];
-
-    var form = document.getElementById('upload');
-    var dropzone = document.getElementById('dropzone')
-
-    form.addEventListener('submit', function(evt) {
-        if (droppedFiles.length > 0) {
-            // ajax it
-            evt.preventDefault();
-            return false;
-        }
-    });
-
-    dropzone.addEventListener('dragover', function(evt) {
-        evt.preventDefault();
-    });
-
-    dropzone.addEventListener('dragenter', function(evt) {
-        dropzone.classList.add('active');
-        evt.preventDefault();
-    });
-
-    dropzone.addEventListener('dragleave', function(evt) {
-        dropzone.classList.remove('active');
-        evt.preventDefault();
-    });
-
-    dropzone.classList.remove('hidden');
-    dropzone.addEventListener('drop', function(evt) {
-        evt.preventDefault();
-        dropzone.classList.remove('active');
-        droppedFiles = evt.dataTransfer.files;
-    });
-</script>";
 
 fn index() -> impl warp::Reply {
     let body = format!(
@@ -87,7 +97,7 @@ fn index() -> impl warp::Reply {
 struct UploadForm {
     alt: String,
     file: Vec<u8>,
-    content_type: Option<String>,
+    content_type: Option<mime::Mime>,
 }
 
 async fn readall(
@@ -124,7 +134,9 @@ async fn parse_multipart_crap(
     Ok(UploadForm {
         alt: String::from_utf8(alt_text)?,
         file: file_contents,
-        content_type: file_content_type,
+        content_type: file_content_type
+            .map(|ct| ct.parse::<mime::Mime>())
+            .transpose()?,
     })
 }
 
@@ -156,8 +168,8 @@ fn show_html(id: String) -> impl warp::Reply {
 
     match upload {
         Ok(u) => {
-            let ct = u.content_type.unwrap_or("image/png".to_string());
-            if ct.starts_with("video/") {
+            let ct = u.content_type.unwrap_or(mime::IMAGE_PNG);
+            if ct.type_() == mime::VIDEO {
                 warp::reply::html(format!(
                     "
                         {}
@@ -176,7 +188,7 @@ fn show_html(id: String) -> impl warp::Reply {
                     CSS, id,
                 ))
             }
-        },
+        }
         Err(_) => warp::reply::html(format!(
             "
                 {}
@@ -188,16 +200,37 @@ fn show_html(id: String) -> impl warp::Reply {
     }
 }
 
+fn to_rejection<E>(_e: E) -> warp::Rejection {
+    warp::reject::reject()
+}
+
+async fn show_raw(id: String) -> Result<impl warp::Reply, warp::Rejection> {
+    let upload: Upload = File::open(format!("public/{}.json", id))
+        .map_err(to_rejection)
+        .and_then(|file| serde_json::from_reader(file).map_err(to_rejection))?;
+
+    let ct = upload.content_type.unwrap_or(mime::IMAGE_PNG);
+
+    tokio::fs::File::open(format!("public/{}", id))
+        .await
+        .map(|file| tokio_util::codec::FramedRead::new(file, tokio_util::codec::BytesCodec::new()))
+        .map(hyper::Body::wrap_stream)
+        .map(|body| {
+            http::Response::builder()
+                .header("Content-Type", ct.to_string())
+                .body(body)
+        })
+        .map_err(to_rejection)
+}
+
 #[tokio::main]
 async fn main() {
     let index = warp::path::end().and(warp::get()).map(index);
     let upload = warp::path("upload")
         .and(warp::multipart::form().max_length(100_000_000))
         .and_then(upload);
-    let show_html = warp::path!("file" / String)
-        .and(warp::get())
-        .map(show_html);
-    let show_raw = warp::path!("file" / "raw" / ..).and(warp::fs::dir("public"));
+    let show_html = warp::path!("file" / String).and(warp::get()).map(show_html);
+    let show_raw = warp::path!("file" / "raw" / String).and_then(show_raw);
 
     let router = index.or(upload).or(show_html).or(show_raw);
 
