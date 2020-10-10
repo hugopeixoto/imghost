@@ -28,8 +28,6 @@ Detect mime type from payload instead of relying on user provided content type.
 
 Reject files that are neither images nor video.
 
-Set the `content-type` in the raw endpoint.
-
 Metadata stripping.
 
 Password protection for uploads. I don't want to end up serving malware. The
@@ -40,5 +38,6 @@ type it every time.
 ## Why
 
 It was an excuse to play with web rust. The code is full of `unwrap`s and it's
-not meant to be deployed. It may be exploitable. I'm using `warp`, and handling
-uploaded files looks a bit weird.
+not meant to be deployed. It may be exploitable. Handling uploaded files looks
+a bit weird. This was initially written using `warp`, but I've migrated it to
+`actix-web`.
