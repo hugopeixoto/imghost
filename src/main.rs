@@ -1,11 +1,9 @@
+use actix_files::NamedFile;
+use actix_multipart::{Multipart, MultipartError};
+use actix_web::{error::ErrorBadRequest, web, App, HttpResponse, HttpServer, Result};
 use futures::stream::TryStreamExt;
-use http::Uri;
-use std::fs::File;
-use std::io::prelude::*;
-use warp::Buf;
-use warp::Filter;
-
 use serde::{Deserialize, Serialize};
+use std::io::prelude::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Upload {
@@ -73,7 +71,7 @@ const CSS: &str = "
   #dropzone.active { background-color: blue; }
 </style>";
 
-fn index() -> impl warp::Reply {
+async fn index() -> HttpResponse {
     let body = format!(
         "
         {}
@@ -91,7 +89,7 @@ fn index() -> impl warp::Reply {
         CSS,
     );
 
-    warp::reply::html(body)
+    HttpResponse::Ok().body(body)
 }
 
 struct UploadForm {
@@ -101,76 +99,82 @@ struct UploadForm {
 }
 
 async fn readall(
-    stream: impl futures::Stream<Item = Result<impl Buf, warp::Error>>,
-) -> Result<Vec<u8>, warp::Error> {
+    stream: impl futures::Stream<Item = std::result::Result<actix_web::web::Bytes, MultipartError>>,
+) -> std::result::Result<Vec<u8>, MultipartError> {
     stream
         .try_fold(vec![], |mut result, buf| {
-            result.append(&mut buf.bytes().into());
+            result.append(&mut buf.into_iter().collect());
             async move { Ok(result) }
         })
         .await
 }
 
 async fn parse_multipart_crap(
-    form: warp::multipart::FormData,
+    mut form: Multipart,
 ) -> Result<UploadForm, Box<dyn std::error::Error>> {
-    let mut parts = form.try_collect::<Vec<_>>().await?;
+    let mut alt: Option<String> = None;
+    let mut file: Option<Vec<u8>> = None;
+    let mut content_type: Option<mime::Mime> = None;
 
-    let mut get_part = |name: &str| {
-        parts
-            .iter()
-            .position(|part| part.name() == name)
-            .map(|p| parts.swap_remove(p))
-            .ok_or(format!("{} part not found", name))
-    };
+    while let Ok(Some(field)) = form.try_next().await {
+        match field.content_disposition().unwrap().get_name() {
+            Some("alt") => {
+                alt = Some(String::from_utf8(readall(field).await?)?);
+            }
+            Some("file") => {
+                content_type = Some(field.content_type().clone());
+                file = Some(readall(field).await?);
+            }
+            _ => {}
+        }
+    }
 
-    let alt = get_part("alt")?;
-    let file = get_part("file")?;
-
-    let file_content_type = file.content_type().map(|ct| ct.to_string());
-    let file_contents = readall(file.stream()).await?;
-    let alt_text = readall(alt.stream()).await?;
-
-    Ok(UploadForm {
-        alt: String::from_utf8(alt_text)?,
-        file: file_contents,
-        content_type: file_content_type
-            .map(|ct| ct.parse::<mime::Mime>())
-            .transpose()?,
-    })
+    if alt.is_some() && file.is_some() {
+        Ok(UploadForm {
+            alt: alt.unwrap(),
+            file: file.unwrap(),
+            content_type: content_type,
+        })
+    } else {
+        Err("".into())
+    }
 }
 
-async fn upload(form: warp::multipart::FormData) -> Result<impl warp::Reply, warp::Rejection> {
+async fn upload(form: Multipart) -> Result<HttpResponse> {
     let upload_form = parse_multipart_crap(form)
         .await
-        .map_err(|_e| warp::reject::reject())?;
+        .map_err(|_e| ErrorBadRequest("dunno"))?;
 
     let id: u128 = rand::random();
-    let mut file = File::create(format!("public/{}", id)).unwrap();
+    let mut file = std::fs::File::create(format!("public/{}", id)).unwrap();
 
     let metadata = Upload {
         alt: upload_form.alt,
         content_type: upload_form.content_type,
     };
-    let metadata_file = File::create(format!("public/{}.json", id)).unwrap();
+
+    let metadata_file = std::fs::File::create(format!("public/{}.json", id)).unwrap();
     serde_json::to_writer_pretty(metadata_file, &metadata).unwrap();
 
+    // TODO this is not async, maybe it should be
     file.write_all(&upload_form.file[..]).unwrap();
 
-    Ok(warp::redirect::redirect(
-        format!("/file/{}", id).parse::<Uri>().unwrap(),
-    ))
+    Ok(HttpResponse::Found()
+        .header("Location", format!("/file/{}", id))
+        .body(""))
 }
 
-fn show_html(id: String) -> impl warp::Reply {
+fn show_html(path: web::Path<(String,)>) -> HttpResponse {
+    let id = path.into_inner().0;
+
     let upload: Result<Upload, _> =
-        serde_json::from_reader(File::open(format!("public/{}.json", id)).unwrap());
+        serde_json::from_reader(std::fs::File::open(format!("public/{}.json", id)).unwrap());
 
     match upload {
         Ok(u) => {
             let ct = u.content_type.unwrap_or(mime::IMAGE_PNG);
             if ct.type_() == mime::VIDEO {
-                warp::reply::html(format!(
+                HttpResponse::Ok().body(format!(
                     "
                         {}
                         <h1><a href='/'>imghost</a></h1>
@@ -179,7 +183,7 @@ fn show_html(id: String) -> impl warp::Reply {
                     CSS, id,
                 ))
             } else {
-                warp::reply::html(format!(
+                HttpResponse::Ok().body(format!(
                     "
                         {}
                         <h1><a href='/'>imghost</a></h1>
@@ -189,7 +193,7 @@ fn show_html(id: String) -> impl warp::Reply {
                 ))
             }
         }
-        Err(_) => warp::reply::html(format!(
+        Err(_) => HttpResponse::NotFound().body(format!(
             "
                 {}
                 <h1><a href='/'>imghost</a></h1>
@@ -200,39 +204,35 @@ fn show_html(id: String) -> impl warp::Reply {
     }
 }
 
-fn to_rejection<E>(_e: E) -> warp::Rejection {
-    warp::reject::reject()
+fn to_bad_request<E>(_e: E) -> actix_web::error::Error {
+    ErrorBadRequest("generic error")
 }
 
-async fn show_raw(id: String) -> Result<impl warp::Reply, warp::Rejection> {
-    let upload: Upload = File::open(format!("public/{}.json", id))
-        .map_err(to_rejection)
-        .and_then(|file| serde_json::from_reader(file).map_err(to_rejection))?;
+async fn show_raw(path: web::Path<(String,)>) -> Result<NamedFile> {
+    let id = path.into_inner().0;
+
+    let upload: Upload = std::fs::File::open(format!("public/{}.json", id))
+        .map_err(to_bad_request)
+        .and_then(|file| serde_json::from_reader(file).map_err(to_bad_request))?;
 
     let ct = upload.content_type.unwrap_or(mime::IMAGE_PNG);
 
-    tokio::fs::File::open(format!("public/{}", id))
-        .await
-        .map(|file| tokio_util::codec::FramedRead::new(file, tokio_util::codec::BytesCodec::new()))
-        .map(hyper::Body::wrap_stream)
-        .map(|body| {
-            http::Response::builder()
-                .header("Content-Type", ct.to_string())
-                .body(body)
-        })
-        .map_err(to_rejection)
+    let path = format!("public/{}", id);
+    NamedFile::open(path)
+        .map(|nf| nf.set_content_type(ct))
+        .map_err(|_e| ErrorBadRequest("couldn't serve file"))
 }
 
-#[tokio::main]
-async fn main() {
-    let index = warp::path::end().and(warp::get()).map(index);
-    let upload = warp::path("upload")
-        .and(warp::multipart::form().max_length(100_000_000))
-        .and_then(upload);
-    let show_html = warp::path!("file" / String).and(warp::get()).map(show_html);
-    let show_raw = warp::path!("file" / "raw" / String).and_then(show_raw);
-
-    let router = index.or(upload).or(show_html).or(show_raw);
-
-    warp::serve(router).run(([127, 0, 0, 1], 3030)).await;
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    HttpServer::new(|| {
+        App::new()
+            .route("/", web::get().to(index))
+            .route("/upload", web::post().to(upload)) // max length 100_000_000
+            .route("file/{id}", web::get().to(show_html))
+            .route("file/raw/{id}", web::get().to(show_raw))
+    })
+    .bind("127.0.0.1:3030")?
+    .run()
+    .await
 }
